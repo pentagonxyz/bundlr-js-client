@@ -62,6 +62,103 @@ export default class NodeUploader extends Uploader {
     * @returns 
      */
     // eslint-disable-next-line @typescript-eslint/ban-types
+    public async getFolderPrice(path: string, indexFile?: string, batchSize = 10, interactivePreflight?: boolean, keepDeleted = true, logFunction?: (log: string) => Promise<any>): Promise<string> {
+        path = p.resolve(path);
+        const alreadyProcessed = new Map();
+
+        if (! await checkPath(path)) {
+            throw new Error(`Unable to access path: ${path}`);
+        }
+
+        // fallback to console.log if no logging function is given and interactive preflight is on.
+        if (!logFunction && interactivePreflight) {
+            logFunction = async (log): Promise<void> => { console.log(log) }
+        } else if (!logFunction) { // blackhole logs
+            logFunction = async (_: any): Promise<any> => { return }
+        }
+
+        // manifest with folder name placed in parent directory of said folder - keeps contamination down.
+        const manifestPath = p.join(p.join(path, `${p.sep}..`), `${p.basename(path)}-manifest.csv`)
+        const csvHeader = "path,id\n"
+        if (await checkPath(manifestPath)) {
+            const rstrm = createReadStream(manifestPath)
+            // check if empty
+            if ((await promises.stat(manifestPath)).size === 0) {
+                await promises.writeFile(manifestPath, csvHeader)
+            }
+            // validate header
+            await new Promise(res => {
+                createReadStream(manifestPath).once("data", async (d) => {
+                    const fl = d.toString().split("\n")[0]
+                    if (`${fl}\n` !== csvHeader) {
+                        await promises.writeFile(manifestPath, csvHeader)
+                    }
+                    res(d)
+                })
+            })
+            const csvStream = Readable.from(rstrm
+                .pipe(csv.parse({ delimiter: ",", columns: true })));
+
+            for await (const record of csvStream) {
+                record as { path: string, id: string }
+                if (record.path && record.id) {
+                    alreadyProcessed.set(record.path, null)
+                }
+            }
+        } else {
+            await promises.writeFile(manifestPath, csvHeader)
+        }
+
+
+        const files = []
+        let total = 0;
+        let i = 0
+        for await (const f of this.walk(path)) {
+            const relPath = p.relative(path, f)
+            if (!alreadyProcessed.has(relPath)) {
+                files.push(f)
+                total += (await promises.stat(f)).size
+            } else {
+                alreadyProcessed.delete(relPath)
+            }
+            if (++i % batchSize == 0) {
+                logFunction(`Checked ${i} files...`)
+            }
+        }
+
+        if (!keepDeleted) {
+            alreadyProcessed.clear()
+        }
+
+        // TODO: add logic to detect changes (MD5/other hash)
+        if (files.length == 0 && alreadyProcessed.size === 0) {
+            logFunction("No items to process")
+            // return the txID of the upload
+            const idpath = p.join(p.join(path, `${p.sep}..`), `${p.basename(path)}-id.txt`)
+            if (await checkPath(idpath)) {
+                return (await promises.readFile(idpath)).toString();
+            }
+            return undefined;
+        }
+
+        const zprice = (await this.utils.getPrice(this.currency, 0)).multipliedBy(files.length);
+
+        const price = (await this.utils.getPrice(this.currency, total)).plus(zprice).toFixed(0)
+
+        return price;
+    }
+
+    /**
+     * Preprocessor for folder uploads, ensures the rest of the system has a correct operating environment.
+     * @param path - path to the folder to be uploaded
+     * @param indexFile - path to the index file (i.e index.html)
+     * @param batchSize - number of items to upload concurrently
+     * @param interactivePreflight - whether to interactively prompt the user for confirmation of upload (CLI ONLY)
+     * @param keepDeleted - Whether to keep previously uploaded (but now deleted) files in the manifest
+     * @param logFunction - for handling logging from the uploader for UX
+    * @returns 
+     */
+    // eslint-disable-next-line @typescript-eslint/ban-types
     public async uploadFolder(path: string, indexFile?: string, batchSize = 10, interactivePreflight?: boolean, keepDeleted = true, logFunction?: (log: string) => Promise<any>): Promise<string> {
         path = p.resolve(path);
         const alreadyProcessed = new Map();
